@@ -1,0 +1,355 @@
+---
+title: "How to use OutcrossSeqDiploidR"
+author: "Corentin Clot"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{How to use OutcrossSeqDiploidR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+
+library(OutcrossSeqDiploidR)
+library(knitr)
+```
+
+Following the idea of OutcrossSeq^[OutcrossSeq: <https://doi.org/10.1016/j.molp.2021.01.003>],
+OutcrossSeqDiploidR contains the functions necessary to locally infer bin-markers 
+using sequence variants called from low coverage sequencing data of a diploid
+outcrossing population.
+Parent specific variants within bins of arbitrary length are used to calculate
+local distance between individuals. This distance information is then used
+to cluster individuals into local bin-markers alleles. Those inferred bin-markers
+are further quality checked based on recombination frequency and deviation
+from local transmission ratio.
+
+## Installation
+To install, you can do it from the github page using `devtools`.
+```{r,eval = F}
+devtools::install_github("https://github.com/...")
+#to install the vignette as well use (takes some time)
+devtools::install_github("https://github.com/...",
+                         build_vignettes = T)
+```
+
+## Expected variant dosages matrix input
+We assume that the user has used vcftools --012 or some alternative method to 
+convert read depths into variant dosages and that the all genome data as been 
+splitted in chromosomal matrices. In this format genotypes are represented as 0, 
+1 and 2, corresponding to the dosage of non-reference alleles. 
+Missing genotypes are represented by -1.
+The first step is to load a chromosomal variant matrix with variants as rows and
+physical position of variant (in bp), parents and individuals as columns.
+```{r}
+knitr::kable(var_mat[1:5,1:8])
+```
+
+## Selecting heterozygous parent private variants
+Then we are going to re-code this bi-parental matrix into a list of 2 parental 
+matrices with genotypes encoded under their simplest form (e.g. 2x1 become 0x1) 
+and missing genotypes encoded as NA.
+In addition, we will only select variants heterozygous and private to one parent 
+(1x0 for P1 and 0x1 for P2) and re-code variant dosage into binary (presence \  
+absence) data, since artefactual homozygosity could be derived from low coverage
+information on a heterozygous site.
+
+```{r}
+parent_mat_list <- recodeParentMatList(dosages_matrix = var_mat,
+                                      P1_name = "P1",
+                                      P2_name = "P2",
+                                      snp_pos_colname= "pos")
+```
+Now we can visualize the re-coded P1 matrix:
+```{r}
+knitr::kable(parent_mat_list$P1[1:5,1:8])
+```
+And the re-coded P2 matrix:
+```{r}
+knitr::kable(parent_mat_list$P2[1:5,1:8])
+```
+
+## Imputation of parent 1 haplotype membership  
+The following steps of the OutcrossSeqR pipeline should be applied independently
+to parent 1 and parent 2 matrices. We will start with parent 1.
+
+### Create physical bins
+First we need to subdivide the chromosomal matrix into physical bins of given
+length using the function `makeBins()`. This length will depend on the level of 
+polymorphism and the sequencing depth of the population. For this example, we 
+are going to use a bin size of 100kb.
+```{r}
+P1_bins <- makeBins(parent_mat_list[['P1']], bin_size = 100000)
+```
+The function return a list of matrices corresponding the subdivision in bins of 
+the input variant matrix. For example, we can display the 5th bin using:
+```{r}
+knitr::kable(P1_bins[[5]][1:5,1:8])
+```
+
+### Compute distance matrix between individuals per bin
+Then, we are going to compute the distance between individuals per bin based on 
+the local variants using the function `getDist()`. If two individuals do not 
+share any variant, the mean distance between individuals in the poulation will 
+be assigned to them. This function is a wrapper around `stats::dist()` and as 
+such a variety of distance methods can be used, the recommended and default one 
+being "euclidean". A list of dissimilarity structure between individuals in 
+local bins of class "dist" will be returned.
+NB:This operation is the most time consuming of the pipeline.
+```{r}
+dist_P1_bins <- getDist(P1_bins, method = "euclidean")
+```
+
+### Clustering individuals based on distance per bin
+In the next step, we are going to use the output of the `getDist()` function to 
+cluster individuals using the function `clusterPop()`. This function is a 
+wrapper around `stats::hclust()` and as such a variety of clustering methods can
+be used, the recommend and default one being "ward.D2".
+NB: When working with large a large dataset, it is recommended to remove the 
+output of `getDist()` after running `clusterPop()`.
+```{r}
+P1_clust_list <- clusterPop(dist_P1_bins, plot = FALSE)
+```
+
+The function `clusterPop()` also offers the **time consuming option** to plot 
+the list of variant matrix clustered per variant and individuals and save the 
+output as pdf. If the users want to use this option they should input the list 
+of variant matrix generated by `makeBins()` in the parameter "bin_list". For the
+purpose of the vignette we are going to skip the plotting but the function usage
+would be as follow:
+```{r,eval = F}
+#We do not evaluate this chunk to build the vignette faster
+P1_clust_list <- clusterPop(dist_P1_bins, plot = T,
+                            bins_list = P1_bins,
+                            pdf_path = "./mypop_chrX_P1_clustering.pdf")
+```
+
+### Extract groupe membership per bin-marker
+Now that we have clustered our individuals we are going to extract two groups of 
+individuals per bin, corresponding to the two haplotypes, or bin-marker alleles,
+that could be inherited from parent 1. This is done using the function `getHap()`
+with parameter k = 2, a wrapper around `stats::hclust()` which returns group
+membership corresponding to bin-markers alleles.
+```{r}
+P1_hap_list <- getHap(P1_clust_list, k=2)
+```
+
+We can visualize the group membership of the 5th bin as follow:
+```{r}
+knitr::kable(P1_hap_list[[5]][1:8])
+```
+
+### Quality check
+Next we are going to check the clustering quality using the function 
+`qualCheck()`. This function allow users to flag bins displaying:
+1. high recombination rates between adjacent bins (comprise between user input
+"min_rec" and "max_rec" for correctly and incorrectly phased haplotype 
+memberships respectively)
+2. deviation exceeding the user inputted "max_dist" from the local transmission 
+ratio distortion (expectation is 1:1) calculated via a moving average across a 
+given number of bins (input with "mv_av").
+The default recommended value are:
+
+- minimal recombination fraction of 0.3
+- maximal recombination fraction of 0.7
+- maximal deviation from transmission ratio distortion of 0.10
+- a window transmission ratio distortion calculated with a moving average across 
+11 bins.
+
+```{r, fig.width= 6, fig.height=4}
+P1_qual_check <- qualCheck(P1_hap_list,
+                           min_rec = 0.30,
+                           max_rec = 0.70,
+                           mv_av = 11,
+                           max_dist = 0.10,
+                           save_plot = F)
+```
+
+The function `qualCheck()` return summary plots on recombination with 
+neighboring bins and deviations from local transmission ratio as well as a 
+dataframe with rows corresponding to bins and the following columns:
+
+- "bin_i": bin of interest
+- "bin_h": previous bin
+- "bin_j": next bin
+- "pos_bin_i": physical position of bin of interest
+- "rec_hi": recombination frequency between bin h and i
+- "rec_ij": recombination frequency between bin i and j
+- "loc_dist": absolute value of bin i deviation from the expected 1:1 
+transmission ratio distortion.
+- "ma_dist": moving average of deviation from the expected 1:1 
+transmission ratio distortion.
+- "quality": character vector flagging aberrant bins. Either "drop (high rec)",
+"drop (high dist)" or "keep".
+```{r}
+knitr::kable(P1_qual_check[1:5,])
+```
+
+Users can use this dataframe to selected bins with the "keep" flag and drop the
+others for subsequent analysis.
+```{r}
+P1_flt_bins <- P1_qual_check$bin_i[which(P1_qual_check$quality == "keep")]
+```
+
+### Phasing
+Now tat noisy bins have been removed from our dataset, it is time to phase 
+the bin-markers using the function `phaseHap()`. This function simply
+calculate recombination frequencies (r) between physically adjacent bins and 
+minimize r by flipping bin-marker phasing when necessary.
+```{r}
+P1_phased_hap <- phaseHap(P1_hap_list[P1_flt_bins])
+```
+
+After a first round of phasing with 'phaseHap()', it is advised to visualize the
+output, remove bins with genetically aberrant data and, manually correct phasing 
+using 'manualPhasing()' if necessary. The simplest way to visualize the phased
+data in base R is to use `stats::heatmap()`:
+```{r, fig.width= 6, fig.height=6}
+heatmap(t(P1_phased_hap$hap_mat),
+        Colv = NA,
+        scale = "none",
+        col = cm.colors(2),
+        xlab = "bins", ylab = "individuals",
+        main = "P1 phased bin-markers")
+```
+
+In this case, despite some imputation errors that will be corrected at a later 
+stage by the package `SmoothDescent`, the phasing looks cleans and no manual 
+tweaking seems necessary.
+
+## Imputation of parent 2 haplotype membership
+At this stage we are done with imputing local haplotype data for parent 1 and 
+will run the same pipeline for P2
+
+```{r, eval = F}
+## We do not evaluate this chunk to build the vignette faster
+# Make bins 
+P2_bins <- makeBins(parent_mat_list[['P2']], bin_size = 100000)
+# Get distance
+dist_P2_bins <- getDist(P2_bins, method = "euclidean")
+# Cluster individuals
+P2_clust_list <- clusterPop(dist_P2_bins, plot = FALSE)
+# Get haplotype membership
+P2_hap_list <- getHap(P2_clust_list, k=2)
+# Quality check
+P2_qual_check <- qualCheck(P2_hap_list,
+                           min_rec = 0.30,
+                           max_rec = 0.70,
+                           mv_av = 11,
+                           max_dist = 0.10,
+                           save_plot = F)
+# Filtering
+P2_flt_bins <- P2_qual_check$bin_i[which(P2_qual_check$quality == "keep")]
+# Phasing
+P2_phased_hap <- phaseHap(P2_hap_list[P2_flt_bins])
+```
+
+Now we can have a look at the phasing of the imputed parent 2 local haplotypes.
+```{r, fig.width= 6, fig.height=6}
+heatmap(t(P2_phased_hap$hap_mat),
+        Colv = NA,
+        scale = "none",
+        col = cm.colors(2),
+        xlab = "bins", ylab = "individuals",
+        main = "P2 phased haplotypes")
+```
+
+## Agregating data and formating for SmoothDescent
+Since no obvious phasing problems are noticeable on both parental data it is time
+to aggregate them and format them for the `SmoothDescent` package using function 
+`formatSD()`.
+```{r}
+SD_input <- formatSD(P1_phased_hap$hap_mat, P2_phased_hap$hap_mat,
+                    P1_name = "P1", P2_name = "P2")
+```
+
+a list of 3 objects usable as input by SmoothDescent:
+1."geno": matrix with markers on the rows, individuals on the columns with marker
+names as Rownames. As expected by 'smooth_decent()' "geno" parameter.
+```{r}
+knitr::kable(SD_input$geno[1:5,1:8])
+```
+
+2."hom": matrix with markers on the rows, homologue names on the columns as 
+expected by 'smooth_decent()' "homologue" parameter.
+```{r}
+knitr::kable(SD_input$hom[1:5,])
+```
+
+3."map": data.frame with at a columns "marker" containing marker name and 
+"position" containing the physical position of the marker. As expected by 
+'smooth_decent()' "map" parameter.
+```{r}
+knitr::kable(SD_input$map[1:5,])
+```
+
+## SmoothDescent
+Now we will make use of the function `smooth_descent()` from the package
+`SmoothDescent`^[SmoothDescent: <https://www.researchsquare.com/article/rs-1165750/v1>] 
+to "smooth" our data based on physical position. 
+Shortly, this function compute identity-by-descent probabilities based on an 
+input map (in our case a physical one) and use them to correct for genotyping 
+errors.
+It is recommended to have a look at the Quick Guide section of the Smooth 
+Descent vignettes before moving on.
+First, we need to install and load `SmoothDescent`:
+```{r,eval = T, message=F}
+devtools::install_github("https://github.com/Alethere/SmoothDescent")
+library(SmoothDescent)
+```
+
+Then we will run `smooth_descent()` on our data with a prediction interval of
+1 Mb.
+```{r}
+sd1 <- smooth_descent(geno = SD_input$geno,
+                      homologue = SD_input$hom,
+                      map = SD_input$map,
+                      ploidy = 2, p1name = "P1", p2name = "P2",
+                      prediction_interval = 1)
+```
+To get a feeling of our data we can visualize the predicted IBD matrix.
+```{r, fig.width= 6, fig.height=4}
+graphical_genotype(sd1$predIBD)
+```
+
+We can also visualize the error matrix
+```{r, fig.width= 6, fig.height=4}
+graphical_genotype(sd1$error)
+```
+
+Smooth Descent can be use iteratively but for the purpose of this vignettes one
+round is sufficient.
+We will now have a look at our corrected genotyping matrix.
+```{r}
+knitr::kable(sd1$newgeno[1:5,1:8])
+```
+
+We will now extract from the genotyping matrix the female markers bellowing to
+haplotype 1 (haplotype 2 being it's mirror image) to visualize the corrected
+genotypes.
+```{r, fig.width= 6, fig.height=6}
+heatmap(t(sd1$newgeno[which(seq_len(nrow(sd1$newgeno)) %% 2 == 1 &
+                              sd1$newgeno[,"P1"] == 1),]),
+        Colv = NA,
+        scale = "none",
+        col = cm.colors(2),
+        xlab = "bins", ylab = "individuals",
+        main = "P1 phased bin-markers")
+```
+
+Of course the same can be done for male haplotype 3 data which was clearly
+improved by Smooth Descent
+```{r, fig.width= 6, fig.height=6}
+heatmap(t(sd1$newgeno[which(seq_len(nrow(sd1$newgeno)) %% 2 == 1 &
+                              sd1$newgeno[,"P2"] == 1),]),
+        Colv = NA,
+        scale = "none",
+        col = cm.colors(2),
+        xlab = "bins", ylab = "individuals",
+        main = "P2 phased bin-markers")
+```

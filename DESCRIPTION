@@ -1,0 +1,19 @@
+Package: OutcrossSeqDiploidR
+Type: Package
+Title: Bin-marker Inference From Low Coverage Sequencing of
+ Diploid Outcrossing Population
+Version: 0.1.0
+Author: Corentin Clot
+Description: Following the idea of OutcrossSeq <doi:10.1016/j.molp.2021.01.003>,
+ OutcrossSeqDiploidR contains the functions necessary to locally infer
+ bin-markers using sequence variants called from low coverage sequencing data of a
+ diploid outcrossing population.
+ Parent specific sequence variants within bins of arbitrary length are used to calculate
+ local distance between individuals. This distance information is then used
+ to cluster individuals into local bin-markers alleles. This inferred bin-marker
+ are further quality checked based on recombination freqeuncy and local deviation from
+ local transmission ratio.
+License: GPL-2
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.1.2
