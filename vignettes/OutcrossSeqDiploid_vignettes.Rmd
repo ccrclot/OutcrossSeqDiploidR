@@ -32,9 +32,9 @@ from local transmission ratio.
 ## Installation
 To install, you can do it from the github page using `devtools`.
 ```{r,eval = F}
-devtools::install_github("https://github.com/...")
+devtools::install_github("https://github.com/ccrclot/OutcrossSeqDiploidR")
 #to install the vignette as well use (takes some time)
-devtools::install_github("https://github.com/...",
+devtools::install_github("https://github.com/ccrclot/OutcrossSeqDiploidR",
                          build_vignettes = T)
 ```
 
